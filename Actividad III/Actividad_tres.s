@@ -1,304 +1,256 @@
-; stm32f103c8 - arm cortex-m3
-; programa en ensamblador (keil) para:
-; - leer 2 pines de gpioc (pc0, pc1) como entrada (menú)
-; - controlar led en pc13 (salida)
-; - generar 100 números pseudoaleatorios en sram a partir de 0x20000100
-; - ordenarlos en la misma área de memoria
-; - registrar banderas en sram (0x20000000: generado, 0x20000004: ordenado)
-;
-; notas:
-; - se asume que la placa usa gpioc y que led está en pc13 (como en "main.c" provisto).
-; - lcg usado: x_{n+1} = a*x + c  (a=1664525, c=1013904223)
-; - ordenamiento: bubble sort (suficiente para 100 elementos en fines educativos)
-; ensamblador compatible con keil (arm/thumb)
+;============================================================
+; STM32F103C8 - ARM Cortex-M3 (Thumb-2)
+; Proyecto: Generación y ordenamiento de números aleatorios
+; Autor: Cabrera Aguilar Fabián
+;============================================================
+; Funcionalidad:
+;  - PC0, PC1: Entradas de menú
+;  - PC13: LED indicador
+;  - Genera 100 números aleatorios (LCG)
+;  - Ordena arreglo en SRAM (Bubble Sort)
+;  - Usa banderas en SRAM:
+;       0x20000000 -> FLAG_GEN
+;       0x20000004 -> FLAG_SORT
+;============================================================
 
-	area |.text|, code, readonly
-	thumb
-	export  reset_handler
-	entry
+        AREA |.text|, CODE, READONLY
+        THUMB
+        EXPORT  reset_handler
+        EXPORT  main
 
-; direcciones de periféricos (stm32f1)
-rcc_apb2enr    equ 0x40021018
-gpioc_base     equ 0x40011000
-gpioc_crl      equ gpioc_base + 0x00
-gpioc_crh      equ gpioc_base + 0x04
-gpioc_idr      equ gpioc_base + 0x08
-gpioc_odr      equ gpioc_base + 0x0c
+;------------------------------------------------------------
+; --- Direcciones de periféricos ---
+RCC_APB2ENR     EQU    0x40021018
+GPIOC_BASE      EQU    0x40011000
+GPIOC_CRL       EQU    GPIOC_BASE + 0x00
+GPIOC_CRH       EQU    GPIOC_BASE + 0x04
+GPIOC_IDR       EQU    GPIOC_BASE + 0x08
+GPIOC_ODR       EQU    GPIOC_BASE + 0x0C
 
-; direcciones sram y banderas
-flag_gen_addr  equ 0x20000000    ; 0 = no generado, 1 = generados
-flag_sort_addr equ 0x20000004    ; 0 = no ordenado, 1 = ordenados
-seed_addr      equ 0x20000008    ; seed para lcg
-array_base     equ 0x20000100    ; base donde guardar los 100 uint32
-count          equ 100
+;------------------------------------------------------------
+; --- Direcciones de SRAM ---
+FLAG_GEN_ADDR   EQU    0x20000000
+FLAG_SORT_ADDR  EQU    0x20000004
+SEED_ADDR       EQU    0x20000008
+ARRAY_BASE      EQU    0x20000100
+COUNT           EQU    100
 
-; constantes para lcg
-lcg_a          equ 1664525
-lcg_c          equ 1013904223
+;------------------------------------------------------------
+; --- Constantes LCG ---
+LCG_A           EQU    1664525
+LCG_C           EQU    1013904223
 
-; ------------------------- reset / inicio ---------------------------------
+;------------------------------------------------------------
 reset_handler
-        ; inicialización básica de la pila/arquitectura asumida por keil (startup de c)
-        ; aquí solo llamamos a nuestro main_asm
-	bl      main_asm
+        BL      main_asm
+        B       .
 
-; ------------------------- main_asm ---------------------------------------
-; bucle principal: inicializa gpioc, apaga led e inspecciona entradas para elegir opción
+main
+        B       reset_handler
+
+;============================================================
+; --- Rutina principal ---
+;============================================================
 main_asm
-	push    {r4-r7,lr}
+        PUSH    {r4-r7, lr}
 
-        ; inicializar banderas en 0
-	ldr     r0, =flag_gen_addr
-	movs    r1, #0
-	str     r1, [r0]
-	ldr     r0, =flag_sort_addr
-	str     r1, [r0]
+        ; Inicializa banderas
+        LDR     r0, =FLAG_GEN_ADDR
+        MOVS    r1, #0
+        STR     r1, [r0]
+        LDR     r0, =FLAG_SORT_ADDR
+        STR     r1, [r0]
 
-        ; inicializar seed con valor fijo (puede cambiarse)
-	ldr     r0, =seed_addr
-	ldr     r1, =0xdeadbeef
-	str     r1, [r0]
+        ; Semilla inicial fija
+        LDR     r0, =SEED_ADDR
+        LDR     r1, =0xDEADBEEF
+        STR     r1, [r0]
 
-	bl      init_portc
-
-        ; asegurar led apagado (pc13 = 0)
-	bl      led_off
+        ; Configurar GPIOC
+        BL      init_portc
+        BL      led_off
 
 main_loop
-	bl      read_inputs     ; devuelve en r0 valor 0..3 (bits: pc1 pc0)
-	cmp     r0, #0
-	beq     state_start     ; "00" -> inicio
-	cmp     r0, #1
-	beq     state_gen       ; "01" -> generar
-	cmp     r0, #2
-	beq     state_checksort ; "10" -> ordenar o verificar bandera
-        ; otros (11) -> no definido, permanecer en inicio
-	b       state_start
+        BL      read_inputs         ; r0 = 0..3 (PC1:PC0)
+        CMP     r0, #0
+        BEQ     state_idle
+        CMP     r0, #1
+        BEQ     state_generate
+        CMP     r0, #2
+        BEQ     state_sort
+        B       state_idle
 
-; ------------------------- estado: inicio (00) -----------------------------
-state_start
-        ; led apagado
-	bl      led_off
-        ; no cambiamos banderas
-	b       main_loop
+;------------------------------------------------------------
+; Estado 00: IDLE (Inicio)
+;------------------------------------------------------------
+state_idle
+        BL      led_off
+        B       main_loop
 
-; ------------------------- estado: generar (01) ---------------------------
-state_gen
-        ; generar 100 números pseudoaleatorios y almacenarlos si no se han generado ya
-	ldr     r0, =flag_gen_addr
-	ldr     r1, [r0]
-	cmp     r1, #1
-	beq     keep_in_gen     ; si ya generados, no volver a generar pero permanecer en opcion 01
+;------------------------------------------------------------
+; Estado 01: Generar aleatorios
+;------------------------------------------------------------
+state_generate
+        LDR     r0, =FLAG_GEN_ADDR
+        LDR     r1, [r0]
+        CMP     r1, #1
+        BEQ     gen_wait_input
 
-	bl      generate_randoms
-        ; encender led y marcar bandera
-	bl      led_on
-	ldr     r0, =flag_gen_addr
-	movs    r1, #1
-	str     r1, [r0]
+        BL      generate_randoms
+        BL      led_on
+        MOVS    r1, #1
+        STR     r1, [r0]            ; FLAG_GEN = 1
 
-keep_in_gen
-        ; si entradas se vuelven "00", regresar al inicio. en caso contrario, permanecer en opción 01.
-	bl      read_inputs
-	cmp     r0, #0
-	beq     state_start
-	b       main_loop
+gen_wait_input
+        BL      read_inputs
+        CMP     r0, #0
+        BEQ     state_idle
+        B       main_loop
 
-; ------------------------- estado: check/sort (10) ------------------------
-state_checksort
-        ; verificar bandera de generación
-	ldr     r0, =flag_gen_addr
-	ldr     r1, [r0]
-	cmp     r1, #1
-	bne     state_start     ; si no generados, regresar al inicio
+;------------------------------------------------------------
+; Estado 10: Ordenar (Bubble Sort)
+;------------------------------------------------------------
+state_sort
+        LDR     r0, =FLAG_GEN_ADDR
+        LDR     r1, [r0]
+        CMP     r1, #1
+        BNE     state_idle
 
-        ; si generados, proceder a ordenar
-	bl      sort_array
-        ; encender led y marcar bandera de ordenado
-	bl      led_on
-	ldr     r0, =flag_sort_addr
-	movs    r1, #1
-	str     r1, [r0]
+        BL      sort_array
+        BL      led_on
+        LDR     r0, =FLAG_SORT_ADDR
+        MOVS    r1, #1
+        STR     r1, [r0]
 
-        ; permanecer en opción 10 hasta que entradas sean "00"
-	bl      read_inputs
-	cmp     r0, #0
-	beq     state_start
-	b       main_loop
+wait_sort
+        BL      read_inputs
+        CMP     r0, #0
+        BEQ     state_idle
+        B       wait_sort
 
-; ------------------------- inicializar gpioc -------------------------------
-; configura pc0, pc1 como entradas con pull-down (modo 00 con cnf=10 no pushpull).
-; configura pc13 como salida push-pull (modo 01 cnf=00 -> 0x2).
+;============================================================
+; --- Configura GPIOC ---
+; PC0, PC1 = entrada pull-down
+; PC13 = salida push-pull
+;============================================================
 init_portc
-        ; habilitar reloj para gpioc: apb2enr bit iopcen = bit 4
-	ldr     r0, =rcc_apb2enr
-	ldr     r1, [r0]
-	movs    r2, #1
-	lsl     r2, r2, #4          ; r2 = 1<<4
-	orr     r1, r1, r2
-	str     r1, [r0]
+        LDR     r0, =RCC_APB2ENR
+        LDR     r1, [r0]
+        ORR     r1, r1, #(1 << 4)       ; Habilita GPIOC
+        STR     r1, [r0]
 
-        ; configurar crl (pc0-pc7) para pc0 y pc1 (bits 0..7)
-        ; para entradas con pull-down: mode=00 cnf=10 -> 0b10 -> value 0x8 for 4-bit field? let's compute:
-        ; para input pull-down: mode=00, cnf=10 -> bits = 0b1000 = 8
-	ldr     r0, =gpioc_crl
-	ldr     r1, [r0]
-        ; clear fields for pc0 and pc1 (4 bits each)
-	movs    r2, #0xff
-	bic     r1, r1, r2
-        ; set pc0 and pc1 to 0b1000 each -> combine 0x88
-	orr     r1, r1, #0x88
-	str     r1, [r0]
+        ; PC0 y PC1 -> Input pull-down
+        LDR     r0, =GPIOC_CRL
+        MOVS    r1, #0x88
+        STR     r1, [r0]
 
-        ; configurar crh para pc13 (pin 13 -> field at bits (13-8)*4 = 20..23)
-	ldr     r0, =gpioc_crh
-	ldr     r1, [r0]
-        ; clear bits 20..23
-	movs    r2, #(0xf << 20)
-	bic     r1, r1, r2
-        ; set mode=01 (output 10mhz) cnf=00 -> 0b0001 -> value 0x1 for field
-	orr     r1, r1, #(0x1 << 20)
-	str     r1, [r0]
+        ; PC13 -> Output push-pull
+        LDR     r0, =GPIOC_CRH
+        LDR     r1, [r0]
+        BIC     r1, r1, #(0xF << 20)
+        ORR     r1, r1, #(0x1 << 20)
+        STR     r1, [r0]
 
-        ; asegurar pull-down para pc0, pc1: escribir en odr = 0 para indicar pull-down when input pull-up/down
-	ldr     r0, =gpioc_odr
-	ldr     r1, [r0]
-	bic r1, r1, #0x03
-	str     r1, [r0]
+        ; Asegurar pull-downs
+        LDR     r0, =GPIOC_ODR
+        BIC     r1, r1, #0x03
+        STR     r1, [r0]
+        BX      lr
 
-	bx      lr
-
-; ------------------------- leer entradas ----------------------------------
-; devuelve en r0 el valor combinado: bit1 = pc1, bit0 = pc0 -> 0..3
+;============================================================
+; --- Lectura de entradas PC0-PC1 ---
+; Devuelve en r0: valor 0..3
+;============================================================
 read_inputs
-	push    {r4,lr}
-	ldr     r1, =gpioc_idr
-	ldr     r2, [r1]
-        ; extraer bit0 y bit1
-	ands    r2, r2, #0x3
-	mov     r0, r2
-	pop     {r4,pc}
+        LDR     r1, =GPIOC_IDR
+        LDR     r0, [r1]
+        ANDS    r0, r0, #0x03
+        BX      lr
 
-; ------------------------- led on/off ------------------------------------
+;============================================================
+; --- LED Control ---
+;============================================================
 led_on
-	push    {r4,lr}
-	ldr     r1, =gpioc_odr
-	ldr     r2, [r1]
-	orr     r2, r2, #(1<<13)
-	str     r2, [r1]
-	pop     {r4,pc}
+        LDR     r1, =GPIOC_ODR
+        LDR     r2, [r1]
+        ORR     r2, r2, #(1 << 13)
+        STR     r2, [r1]
+        BX      lr
 
 led_off
-	push    {r4,lr}
-	ldr     r1, =gpioc_odr
-	ldr     r2, [r1]
-	bic     r2, r2, #(1<<13)
-	str     r2, [r1]
-	pop     {r4,pc}
+        LDR     r1, =GPIOC_ODR
+        LDR     r2, [r1]
+        BIC     r2, r2, #(1 << 13)
+        STR     r2, [r1]
+        BX      lr
 
-; ------------------------- generar 100 números pseudoaleatorios -------------
-; usa lcg y almacena 100 uint32 a partir de array_base
+;============================================================
+; --- Generador LCG de 100 números aleatorios ---
+; x_{n+1} = (a*x + c)
+;============================================================
 generate_randoms
-	push    {r4-r6,lr}
-	ldr     r4, =array_base   ; base ptr
-	movs    r5, #0            ; contador i = 0
+        PUSH    {r4-r7, lr}
+        LDR     r4, =ARRAY_BASE
+        MOVS    r5, #0
 
 gen_loop
-        ; cargar seed
-	ldr     r0, =seed_addr
-	ldr     r1, [r0]
-        ; r1 = seed
-        ; multiplicar por a: r1 = r1 * lcg_a
-	ldr r2, =1664525
-	mul     r1, r1, r2        ; r1 = seed * a
-        ; sumar c
-	ldr     r2, =lcg_c
-	ldr     r2, [r2]
-	adds    r1, r1, r2
-        ; guardar nuevo seed
-	str     r1, [r0]
-        ; almacenar en memoria: *(base + i*4) = r1
-	mov     r0, r4
-	mov     r2, r5
-	lsls    r2, r2, #2        ; r2 = i*4
-	adds    r0, r0, r2
-	str     r1, [r0]
+        LDR     r0, =SEED_ADDR
+        LDR     r1, [r0]
+        LDR     r2, =LCG_A
+        MUL     r1, r1, r2
+        LDR     r2, =LCG_C
+        ADD     r1, r1, r2
+        STR     r1, [r0]           ; Actualiza semilla
 
-        ; incrementar i
-	adds    r5, r5, #1
-	cmp     r5, #count
-	blt     gen_loop
+        ADD     r6, r4, r5, LSL #2
+        STR     r1, [r6]           ; Guarda en arreglo
 
-	pop     {r4-r6,pc}
+        ADDS    r5, r5, #1
+        CMP     r5, #COUNT
+        BLT     gen_loop
+        POP     {r4-r7, pc}
 
-; ------------------------- ordenar arreglo (bubble sort) -------------------
-; ordena count elementos (100) en base array_base, inplace
+;============================================================
+; --- Bubble Sort Optimizado ---
+; Ordena ARRAY_BASE[COUNT]
+;============================================================
 sort_array
-	push    {r4-r11,lr}
-	ldr     r4, =array_base   ; base
-	movs    r5, #0            ; i = 0
+        PUSH    {r4-r11, lr}
+        LDR     r4, =ARRAY_BASE
 
+        MOVS    r5, #0              ; i = 0
 outer_loop
-        ; if i >= count-1 -> done
-	movs    r6, #1
-	ldr     r7, =count
-	ldr     r7, [r7]
-	subs    r7, r7, r6       ; count-1
-	cmp     r5, r7
-	bge     sort_done
+        CMP     r5, #COUNT
+        BGE     sort_done
 
-        ; j = 0
-	movs    r6, #0
+        MOVS    r6, #0              ; j = 0
+        MOVS    r7, #COUNT
+        SUBS    r7, r7, r5
+        SUBS    r7, r7, #1          ; n-i-1
 
 inner_loop
-        ; if j >= count - i - 1 -> break
-	ldr     r7, =count
-	ldr     r7, [r7]
-	subs    r7, r7, r5
-	subs    r7, r7, #1       ; count - i - 1
-	cmp     r6, r7
-	bge     end_inner
+        CMP     r6, r7
+        BGE     next_outer
 
-        ; addr1 = base + j*4
-	mov     r0, r4
-	mov     r1, r6
-	lsls    r1, r1, #2
-	adds    r0, r0, r1
-	ldr     r8, [r0]         ; val1
+        ADD     r8, r4, r6, LSL #2  ; addr[j]
+        LDR     r9, [r8]            ; val1
+        LDR     r10, [r8, #4]       ; val2
 
-        ; addr2 = base + (j+1)*4
-	adds    r1, r1, #4
-	adds    r9, r4, r1
-	ldr     r9, [r9]         ; val2
+        CMP     r9, r10
+        BLE     no_swap
 
-        ; comparar val1 y val2
-	cmp     r8, r9
-	ble     no_swap
-
-        ; swap
-        ; store val2 at addr1
-	mov     r2, r4
-	mov     r3, r6
-	lsls    r3, r3, #2
-	adds    r2, r2, r3
-	str     r9, [r2]
-        ; store val1 at addr2
-	adds    r2, r2, #4
-	str     r8, [r2]
+        STR     r10, [r8]
+        STR     r9, [r8, #4]
 
 no_swap
-        ; j++
-	adds    r6, r6, #1
-	b       inner_loop
+        ADDS    r6, r6, #1
+        B       inner_loop
 
-end_inner
-        ; i++
-	adds    r5, r5, #1
-	b       outer_loop
+next_outer
+        ADDS    r5, r5, #1
+        B       outer_loop
 
 sort_done
-	pop     {r4-r11,pc}
+        POP     {r4-r11, pc}
 
-	b reset_handler
-	
-	end
+        END
